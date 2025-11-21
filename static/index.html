@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>经 - 联机版</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f0f2f5; }
+        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .status-bar { display: flex; justify-content: space-between; margin-bottom: 20px; padding: 10px; background: #e3f2fd; border-radius: 4px; }
+        .game-area { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+        .map-area { border: 1px solid #ddd; padding: 10px; border-radius: 4px; }
+        .log-area { border: 1px solid #ddd; padding: 10px; height: 300px; overflow-y: auto; background: #fafafa; font-size: 0.9em; }
+        .controls { margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 4px; }
+        .location-card { padding: 10px; margin: 5px 0; border: 1px solid #eee; border-radius: 4px; }
+        .location-card.active { border-color: #2196f3; background: #e3f2fd; }
+        .player-badge { display: inline-block; padding: 2px 6px; background: #4caf50; color: white; border-radius: 10px; font-size: 0.8em; margin-right: 5px; }
+        .player-badge.me { background: #ff9800; }
+        button { padding: 8px 16px; cursor: pointer; background: #2196f3; color: white; border: none; border-radius: 4px; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        button.secondary { background: #757575; }
+        input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        
+        .phase-indicator { font-weight: bold; color: #d32f2f; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>《经》 - 联机对战</h1>
+        
+        <div id="login-screen">
+            <input type="text" id="username" placeholder="输入你的昵称" />
+            <button onclick="joinGame()">加入游戏</button>
+        </div>
+
+        <div id="game-screen" style="display: none;">
+            <div class="status-bar">
+                <div>当前阶段: <span id="phase-display" class="phase-indicator">等待中</span></div>
+                <div>我的状态: <span id="my-status">HP: 12/12</span></div>
+            </div>
+
+            <div class="game-area">
+                <div class="map-area" id="map-container">
+                    <!-- 地图内容动态生成 -->
+                </div>
+                <div class="log-area" id="log-container">
+                    <!-- 日志 -->
+                </div>
+            </div>
+
+            <div class="controls" id="controls-area">
+                <!-- 动态操作按钮 -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws;
+        // 使用 sessionStorage 替代 localStorage，这样每个标签页都会被视为一个新玩家
+        let myId = sessionStorage.getItem('game_client_id') || generateUUID();
+        sessionStorage.setItem('game_client_id', myId);
+        let myName = "";
+        let gameState = null;
+
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        function joinGame() {
+            const nameInput = document.getElementById('username');
+            if (!nameInput.value) return alert("请输入昵称");
+            
+            myName = nameInput.value;
+            
+            // 连接 WebSocket
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/${myId}`;
+            
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                console.log("Connected");
+                ws.send(JSON.stringify({
+                    action: "join",
+                    payload: { name: myName }
+                }));
+                document.getElementById('login-screen').style.display = 'none';
+                document.getElementById('game-screen').style.display = 'block';
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'state') {
+                    gameState = msg.data;
+                    renderGame();
+                }
+            };
+
+            ws.onclose = () => {
+                alert("连接断开，请刷新页面重试");
+            };
+        }
+
+        function sendAction(action, payload = {}) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action, payload }));
+            }
+        }
+
+        function renderGame() {
+            if (!gameState) return;
+
+            // 1. 更新阶段显示
+            const phaseMap = {
+                "WAITING": "等待玩家加入",
+                "ROLL": "投掷阶段",
+                "ACTION": "行动阶段",
+                "SETTLEMENT": "结算阶段"
+            };
+            document.getElementById('phase-display').innerText = phaseMap[gameState.phase] || gameState.phase;
+
+            // 2. 更新我的状态
+            const me = gameState.players.find(p => p.id === myId);
+            if (me) {
+                document.getElementById('my-status').innerText = `HP: ${me.hp}/${me.max_hp} | 位置: ${me.pos}`;
+            }
+
+            // 3. 渲染地图和玩家
+            const mapContainer = document.getElementById('map-container');
+            mapContainer.innerHTML = '';
+            gameState.locations.forEach(loc => {
+                const div = document.createElement('div');
+                div.className = `location-card ${me && me.pos === loc ? 'active' : ''}`;
+                
+                // 找出在这个位置的玩家
+                const playersHere = gameState.players.filter(p => p.pos === loc);
+                const playerHtml = playersHere.map(p => 
+                    `<span class="player-badge ${p.id === myId ? 'me' : ''}">${p.name} (${p.hp})</span>`
+                ).join('');
+
+                div.innerHTML = `<strong>${loc}</strong><br>${playerHtml}`;
+                mapContainer.appendChild(div);
+            });
+
+            // 4. 渲染日志
+            const logContainer = document.getElementById('log-container');
+            logContainer.innerHTML = gameState.logs.map(l => `<div>> ${l}</div>`).reverse().join('');
+
+            // 5. 渲染控制按钮
+            const controls = document.getElementById('controls-area');
+            controls.innerHTML = '';
+
+            if (gameState.phase === 'WAITING') {
+                const playerCount = gameState.players.length;
+                const btn = document.createElement('button');
+                btn.innerText = `开始游戏 (当前人数: ${playerCount}, 至少2人)`;
+                if (playerCount < 2) {
+                    btn.disabled = true;
+                    btn.title = "人数不足";
+                }
+                btn.onclick = () => sendAction('start_game');
+                controls.appendChild(btn);
+            } else if (gameState.phase === 'ROLL') {
+                if (me && me.roll_value === 0) {
+                    const btn = document.createElement('button');
+                    btn.innerText = "投掷骰子 (1d6)";
+                    btn.onclick = () => sendAction('roll');
+                    controls.appendChild(btn);
+                } else {
+                    controls.innerHTML = "等待其他玩家投掷...";
+                }
+            } else if (gameState.phase === 'ACTION') {
+                if (gameState.current_actor === myId) {
+                    controls.innerHTML = "<strong>轮到你了！请选择行动：</strong><br><br>";
+                    
+                    // 移动按钮
+                    gameState.locations.forEach(loc => {
+                        if (loc !== me.pos) {
+                            const btn = document.createElement('button');
+                            btn.innerText = `移动到 ${loc}`;
+                            btn.style.margin = "5px";
+                            btn.onclick = () => sendAction('move', { target: loc });
+                            controls.appendChild(btn);
+                        }
+                    });
+                } else {
+                    const currentName = gameState.players.find(p => p.id === gameState.current_actor)?.name || "未知";
+                    controls.innerHTML = `等待 ${currentName} 行动...`;
+                }
+            }
+        }
+    </script>
+</body>
+</html>
